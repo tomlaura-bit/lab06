@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Administración de usuarios</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><main>
+<section id="login"><h1>Administración de usuarios</h1><p>Ingrese con el perfil administrador.</p>
+<form id="loginForm"><label>Correo<input id="loginEmail" type="email" required></label><label>Contraseña<input id="loginPassword" type="password" required></label><button>Ingresar</button></form></section>
+<section id="panel" hidden><header><div><h1>Usuarios</h1><p>CRUD, PostgreSQL y perfiles en Amazon S3</p></div><button id="logout" class="secondary">Salir</button></header>
+<form id="userForm"><input id="editing" type="hidden"><label>Nombre<input id="name" required minlength="2"></label><label>Correo<input id="email" type="email" required></label><label>Contraseña<input id="password" type="password" minlength="10"></label><label>Rol<select id="role"><option value="user">Usuario</option><option value="admin">Administrador</option></select></label><label class="check"><input id="active" type="checkbox" checked> Activo</label><div class="actions"><button>Guardar</button><button id="cancel" type="button" class="secondary">Cancelar</button></div></form>
+<p id="message"></p><div class="tableWrap"><table><thead><tr><th>Foto</th><th>Nombre</th><th>Correo</th><th>Rol</th><th>Estado</th><th>Acciones</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+</main><script src="/static/app.js"></script></body></html>

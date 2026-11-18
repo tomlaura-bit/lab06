@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Laboratorio 6 - EC2, RDS PostgreSQL, S3, IAM y Bedrock
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+  ArtifactKey:
+    Type: String
+    Default: deploy/solucion_lab6.zip
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+  SubnetC:
+    Type: AWS::EC2::Subnet::Id
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  AdminCredentials:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: lab6/admin-credentials
+      Description: Credenciales iniciales del administrador del laboratorio 6
+      GenerateSecretString:
+        SecretStringTemplate: '{"email":"admin@lab6.example.com"}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: Lab6
+
+  JwtSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: lab6/jwt-secret
+      Description: Firma JWT del laboratorio 6
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: Lab6
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso HTTP a las dos aplicaciones del laboratorio
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+          Description: Aplicacion administrativa
+        - IpProtocol: tcp
+          FromPort: 8001
+          ToPort: 8001
+          CidrIp: 0.0.0.0/0
+          Description: Aplicacion RAG
+      Tags:
+        - Key: Name
+          Value: lab6-app-sg
+        - Key: Project
+          Value: Lab6
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL solo desde la instancia del laboratorio
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+          Description: PostgreSQL desde EC2
+      Tags:
+        - Key: Name
+          Value: lab6-db-sg
+        - Key: Project
+          Value: Lab6
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subredes para RDS del laboratorio 6
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+        - !Ref SubnetC
+      Tags:
+        - Key: Project
+          Value: Lab6
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: lab6-postgresql
+      Engine: postgres
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: adminapp
+      MasterUsername: lab6admin
+      ManageMasterUserPassword: true
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 0
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      Tags:
+        - Key: Project
+          Value: Lab6
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab6-ec2-runtime-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: lab6-runtime-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadDeploymentArtifact
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactKey}
+              - Sid: ListArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}
+              - Sid: ManageProfileImages
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/profiles/*
+              - Sid: ReadApplicationSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref AdminCredentials
+                  - !Ref JwtSecret
+                  - !GetAtt Database.MasterUserSecret.SecretArn
+              - Sid: InvokeBedrockModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: Lab6
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ApplicationInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: Database
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: m7i-flex.large
+      SubnetId: !Ref SubnetA
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/lab6-bootstrap.log | logger -t lab6-bootstrap -s 2>/dev/console) 2>&1
+          dnf update -y
+          dnf install -y docker jq unzip
+          systemctl enable --now docker
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          curl -fsSL https://github.com/docker/buildx/releases/download/v0.20.1/buildx-v0.20.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+          mkdir -p /opt/lab6
+          aws s3 cp s3://${ArtifactBucket}/${ArtifactKey} /tmp/solucion_lab6.zip --region ${AWS::Region}
+          unzip -oq /tmp/solucion_lab6.zip -d /opt/lab6
+
+          DB_JSON=$(aws secretsmanager get-secret-value --secret-id '${Database.MasterUserSecret.SecretArn}' --region ${AWS::Region} --query SecretString --output text)
+          ADMIN_JSON=$(aws secretsmanager get-secret-value --secret-id '${AdminCredentials}' --region ${AWS::Region} --query SecretString --output text)
+          JWT_VALUE=$(aws secretsmanager get-secret-value --secret-id '${JwtSecret}' --region ${AWS::Region} --query SecretString --output text)
+          DB_USER=$(printf '%s' "$DB_JSON" | jq -r .username)
+          DB_PASS=$(printf '%s' "$DB_JSON" | jq -r .password)
+          ADMIN_EMAIL=$(printf '%s' "$ADMIN_JSON" | jq -r .email)
+          ADMIN_PASS=$(printf '%s' "$ADMIN_JSON" | jq -r .password)
+          export DB_USER DB_PASS
+          DB_USER_ESC=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["DB_USER"], safe=""))')
+          DB_PASS_ESC=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["DB_PASS"], safe=""))')
+
+          cd /opt/lab6/pregunta1_admin_aws
+          umask 077
+          cat > .env <<ENV1
+          DATABASE_URL=postgresql+psycopg://$DB_USER_ESC:$DB_PASS_ESC@${Database.Endpoint.Address}:5432/adminapp
+          JWT_SECRET=$JWT_VALUE
+          JWT_EXPIRE_MINUTES=60
+          ADMIN_EMAIL=$ADMIN_EMAIL
+          ADMIN_PASSWORD=$ADMIN_PASS
+          AWS_REGION=${AWS::Region}
+          S3_BUCKET=${ArtifactBucket}
+          S3_PUBLIC_BASE_URL=
+          MAX_UPLOAD_MB=5
+          ENV1
+          docker compose -f docker-compose.aws.yml up -d --build
+
+          cd /opt/lab6/pregunta2_rag
+          cat > .env <<ENV2
+          DATABASE_URL=postgresql+psycopg://rag:rag@db:5432/rag
+          EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+          EMBEDDING_DIMENSION=384
+          TOP_K=6
+          CHUNK_SIZE=1200
+          CHUNK_OVERLAP=180
+          GENERATOR_PROVIDER=bedrock
+          AWS_REGION=${AWS::Region}
+          BEDROCK_MODEL=us.amazon.nova-lite-v1:0
+          BEDROCK_MAX_TOKENS=800
+          MAX_PDF_PAGES=300
+          MAX_TOTAL_PAGES=900
+          ENV2
+          docker compose up -d --build
+          docker system prune -f
+
+      Tags:
+        - Key: Name
+          Value: lab6-aplicaciones
+        - Key: Project
+          Value: Lab6
+
+Outputs:
+  InstanceId:
+    Value: !Ref ApplicationInstance
+  PublicIp:
+    Value: !GetAtt ApplicationInstance.PublicIp
+  AdminUrl:
+    Value: !Sub http://${ApplicationInstance.PublicIp}:8000
+  RagUrl:
+    Value: !Sub http://${ApplicationInstance.PublicIp}:8001
+  BucketName:
+    Value: !Ref ArtifactBucket
+  RdsEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  AdminSecretArn:
+    Value: !Ref AdminCredentials

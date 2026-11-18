@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: adminapp
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - admin_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d adminapp"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+  web:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  admin_db:
